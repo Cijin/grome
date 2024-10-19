@@ -23,6 +23,22 @@ type response struct {
 	content string
 }
 
+func (r *response) String() string {
+	var b strings.Builder
+
+	b.WriteString(fmt.Sprintf("Protocol: %s\n", r.proto))
+	b.WriteString(fmt.Sprintf("Status: %s\n", r.status))
+	b.WriteString("Headers:\n")
+
+	for key, value := range r.headers {
+		b.WriteString(fmt.Sprintf("\t%s: %s\n", key, value))
+	}
+
+	b.WriteString(fmt.Sprintf("Content:\n %s", r.content))
+
+	return b.String()
+}
+
 func New(rawURL string) (*gromeURL, error) {
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
@@ -53,9 +69,8 @@ func (g *gromeURL) Request() (*response, error) {
 	_, err = io.Copy(&b, conn)
 
 	var res response
-	resScanner := bufio.NewScanner(&b)
-	resScanner.Scan()
-	statusLine := resScanner.Text()
+	resReader := bufio.NewReader(&b)
+	statusLine, _ := resReader.ReadString('\n')
 	proto, status, ok := strings.Cut(statusLine, " ")
 	if !ok {
 		return nil, fmt.Errorf("malformed HTTP response %s", statusLine)
@@ -65,17 +80,13 @@ func (g *gromeURL) Request() (*response, error) {
 	res.status = status
 
 	headers := make(map[string]string)
-	for resScanner.Scan() {
-		line := resScanner.Text()
+	for {
+		line, _ := resReader.ReadString('\n')
 		if line == "\r\n" {
 			break
 		}
-
 		header, value, _ := strings.Cut(line, ":")
 		headers[strings.ToLower(header)] = strings.TrimSpace(value)
-	}
-	if err := resScanner.Err(); err != nil {
-		return nil, err
 	}
 
 	if value, ok := headers["transfer-encoding"]; ok {
@@ -87,16 +98,7 @@ func (g *gromeURL) Request() (*response, error) {
 	}
 
 	res.headers = headers
-
-	var content strings.Builder
-	for resScanner.Scan() {
-		fmt.Fprint(&content, resScanner.Text())
-	}
-	if err := resScanner.Err(); err != nil {
-		return nil, err
-	}
-
-	res.content = content.String()
+	res.content, _ = resReader.ReadString(0)
 
 	return &res, nil
 }

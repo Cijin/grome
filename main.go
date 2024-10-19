@@ -8,6 +8,6 @@ func main() {
 		panic(err)
 	}
 
-	res, err := g.Request()
-	fmt.Println(res.content, err)
+	res, _ := g.Request()
+	fmt.Println(res)
 }
