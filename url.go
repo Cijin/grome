@@ -70,13 +70,12 @@ func (g *gromeURL) Request() (*response, error) {
 	}
 	defer conn.Close()
 
-	b := g.requestBuffer()
-	_, err := conn.Write(b.Bytes())
+	_, err := conn.Write(g.request())
 	if err != nil {
 		return nil, err
 	}
 
-	b.Reset()
+	var b bytes.Buffer
 	_, err = io.Copy(&b, conn)
 
 	var res response
@@ -114,26 +113,29 @@ func (g *gromeURL) Request() (*response, error) {
 	return &res, nil
 }
 
-func (g *gromeURL) requestBuffer() bytes.Buffer {
+func (g *gromeURL) request() []byte {
 	var b bytes.Buffer
 	b.WriteString(fmt.Sprintf("%s %s %s\r\n", http.MethodGet, g.URL.Path, httpVersion))
-	g.defaultHeaders(&b)
+	b.WriteString(g.defaultHeaders())
 	b.WriteString("\r\n")
 
-	return b
+	return b.Bytes()
 }
 
-func (g *gromeURL) defaultHeaders(b *bytes.Buffer) {
+func (g *gromeURL) defaultHeaders() string {
 	headers := make(map[string]string)
 	headers["Host"] = g.URL.Host
 	headers["User-Agent"] = userAgent
 	headers["Connection"] = "close"
 
-	for k, v := range headers {
-		addHeader(b, k, v)
-	}
+	return addHeaders(headers)
 }
 
-func addHeader(b *bytes.Buffer, key, value string) {
-	b.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
+func addHeaders(h map[string]string) string {
+	var b bytes.Buffer
+	for k, v := range h {
+		b.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+	}
+
+	return b.String()
 }
