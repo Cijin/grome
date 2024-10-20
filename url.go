@@ -48,7 +48,17 @@ func (g *gromeURL) Request() (*response, error) {
 		conn = tls.Client(c, &tls.Config{RootCAs: roots, ServerName: g.URL.Host})
 	} else {
 		var err error
-		conn, err = net.Dial("tcp", net.JoinHostPort(g.URL.Host, "80"))
+		port := "80"
+		host := g.URL.Host
+		if strings.Contains(g.URL.Host, ":") {
+			var ok bool
+			host, port, ok = strings.Cut(g.URL.Host, ":")
+			if !ok {
+				return nil, fmt.Errorf("unable to process host and custom port for: %s", g.URL.Host)
+			}
+		}
+
+		conn, err = net.Dial("tcp", net.JoinHostPort(host, port))
 		if err != nil {
 			return nil, err
 		}
