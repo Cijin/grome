@@ -14,6 +14,11 @@ import (
 	"strings"
 )
 
+const (
+	userAgent   = "grome-browser"
+	httpVersion = "HTTP/1.1"
+)
+
 var supportedSchemes = []string{"https", "http"}
 
 type gromeURL struct {
@@ -65,10 +70,7 @@ func (g *gromeURL) Request() (*response, error) {
 	}
 	defer conn.Close()
 
-	var b bytes.Buffer
-	b.WriteString(fmt.Sprintf("%s %s HTTP/1.0\r\n", http.MethodGet, g.URL.Path))
-	b.WriteString(fmt.Sprintf("Host: %s\r\n", g.URL.Host))
-	b.WriteString("\r\n")
+	b := g.requestBuffer()
 	_, err := conn.Write(b.Bytes())
 	if err != nil {
 		return nil, err
@@ -110,4 +112,28 @@ func (g *gromeURL) Request() (*response, error) {
 	res.content, _ = resReader.ReadString(0)
 
 	return &res, nil
+}
+
+func (g *gromeURL) requestBuffer() bytes.Buffer {
+	var b bytes.Buffer
+	b.WriteString(fmt.Sprintf("%s %s %s\r\n", http.MethodGet, g.URL.Path, httpVersion))
+	g.defaultHeaders(&b)
+	b.WriteString("\r\n")
+
+	return b
+}
+
+func (g *gromeURL) defaultHeaders(b *bytes.Buffer) {
+	headers := make(map[string]string)
+	headers["Host"] = g.URL.Host
+	headers["User-Agent"] = userAgent
+	headers["Connection"] = "close"
+
+	for k, v := range headers {
+		addHeader(b, k, v)
+	}
+}
+
+func addHeader(b *bytes.Buffer, key, value string) {
+	b.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
 }
