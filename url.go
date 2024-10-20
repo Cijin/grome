@@ -5,14 +5,11 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -44,7 +41,7 @@ func (g *gromeURL) Request() (*response, error) {
 			return nil, err
 		}
 
-		roots, err := loadCert()
+		roots, err := x509.SystemCertPool()
 		if err != nil {
 			return nil, err
 		}
@@ -103,29 +100,4 @@ func (g *gromeURL) Request() (*response, error) {
 	res.content, _ = resReader.ReadString(0)
 
 	return &res, nil
-}
-
-func loadCert() (*x509.CertPool, error) {
-	roots, err := x509.SystemCertPool()
-	if err != nil {
-		roots = x509.NewCertPool()
-	}
-
-	wd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-
-	certfile := filepath.Join(wd, "certs", "cert.pem")
-	cert, err := os.ReadFile(certfile)
-	if err != nil {
-		return nil, err
-	}
-
-	ok := roots.AppendCertsFromPEM(cert)
-	if !ok {
-		return nil, errors.New("failed to parse certificate")
-	}
-
-	return roots, nil
 }
