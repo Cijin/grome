@@ -6,7 +6,7 @@ import (
 )
 
 func main() {
-	g, err := New("https://browser.engineering/http.html")
+	g, err := New("view-source:http://example.org/")
 	if err != nil {
 		fmt.Println("error parsing url:", err)
 		os.Exit(1)

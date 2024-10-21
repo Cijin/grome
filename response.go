@@ -6,10 +6,11 @@ import (
 )
 
 type response struct {
-	proto   string
-	status  string
-	headers map[string]string
-	content string
+	proto      string
+	status     string
+	headers    map[string]string
+	content    string
+	viewsource bool
 }
 
 func (r *response) String() string {
@@ -29,16 +30,49 @@ func (r *response) String() string {
 }
 
 func (r *response) Show() string {
-	var b strings.Builder
+	if r.viewsource {
+		return r.content
+	}
 
+	var b strings.Builder
 	var inTag bool
-	for _, c := range r.content {
+	for i := 0; i < len(r.content); i++ {
+		c := r.content[i]
 		if c == '<' {
 			inTag = true
 		} else if c == '>' {
 			inTag = false
 		} else if !inTag {
-			b.WriteRune(c)
+			if c == '&' {
+				if i+3 != len(r.content) {
+					nextByte := r.content[i+1]
+					var printByte byte
+					if nextByte == 'l' {
+						printByte = '<'
+					} else if nextByte == 'g' {
+						printByte = '>'
+					} else {
+						b.WriteByte(c)
+						continue
+					}
+
+					nextByte = r.content[i+2]
+					if nextByte != 't' {
+						b.WriteByte(c)
+						continue
+					}
+
+					nextByte = r.content[i+3]
+					if nextByte != ';' {
+						b.WriteByte(c)
+						continue
+					}
+					b.WriteByte(printByte)
+					i += 3
+					continue
+				}
+			}
+			b.WriteByte(c)
 		}
 	}
 

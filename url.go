@@ -5,12 +5,13 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
+	"os"
 	"strings"
 )
 
@@ -19,10 +20,11 @@ const (
 	httpVersion = "HTTP/1.1"
 )
 
-var supportedSchemes = []string{"https", "http"}
+// TODO 1-6
 
 type gromeURL struct {
-	URL *url.URL
+	URL        *url.URL
+	viewsource bool
 }
 
 func New(rawURL string) (*gromeURL, error) {
@@ -31,16 +33,31 @@ func New(rawURL string) (*gromeURL, error) {
 		return nil, err
 	}
 
-	if !slices.Contains(supportedSchemes, parsedURL.Scheme) {
-		return nil, fmt.Errorf("unsupported url scheme:%s", parsedURL.Scheme)
+	viewsource := parsedURL.Scheme == "view-source"
+	if viewsource {
+		_, sourceURL, ok := strings.Cut(parsedURL.String(), ":")
+		if !ok {
+			return nil, errors.New("viewsource shceme url is incorrectly formatted")
+		}
+
+		parsedSourceURL, err := url.Parse(sourceURL)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse viewsource URL: %v", err)
+		}
+
+		parsedURL = parsedSourceURL
 	}
 
-	return &gromeURL{parsedURL}, nil
+	return &gromeURL{parsedURL, viewsource}, nil
 }
 
 func (g *gromeURL) Request() (*response, error) {
 	var conn io.ReadWriteCloser
-	if g.URL.Scheme == "https" {
+	var res response
+	res.viewsource = g.viewsource
+
+	switch g.URL.Scheme {
+	case "https":
 		c, err := net.Dial("tcp", net.JoinHostPort(g.URL.Host, "443"))
 		if err != nil {
 			return nil, err
@@ -51,7 +68,8 @@ func (g *gromeURL) Request() (*response, error) {
 			return nil, err
 		}
 		conn = tls.Client(c, &tls.Config{RootCAs: roots, ServerName: g.URL.Host})
-	} else {
+
+	case "http":
 		var err error
 		port := "80"
 		host := g.URL.Host
@@ -67,6 +85,53 @@ func (g *gromeURL) Request() (*response, error) {
 		if err != nil {
 			return nil, err
 		}
+
+	case "file":
+		path := g.URL.Path
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+
+		if info.IsDir() {
+			files, err := os.ReadDir(path)
+			if err != nil {
+				return nil, err
+			}
+
+			var b strings.Builder
+			for _, file := range files {
+				if file.IsDir() {
+					b.WriteString(fmt.Sprintf("\n%s/", file.Name()))
+					continue
+				}
+
+				b.WriteString(fmt.Sprintf("\n%s", file.Name()))
+			}
+
+			res.content = b.String()
+			return &res, nil
+		}
+
+		res.content = fmt.Sprintf("Name: %s\tSize: %d Bytes\n", info.Name(), info.Size())
+		return &res, nil
+
+	case "data":
+		_, data, ok := strings.Cut(g.URL.String(), ":")
+		if !ok {
+			return nil, fmt.Errorf("%s is not a valid data URL", g.URL)
+		}
+
+		_, value, ok := strings.Cut(data, ",")
+		if !ok {
+			return nil, fmt.Errorf("scheme:%s, invalid format for data:%s", g.URL.Scheme, data)
+		}
+
+		res.content = value
+		return &res, nil
+
+	default:
+		return nil, fmt.Errorf("grome currently does not support scheme:%s", g.URL.Scheme)
 	}
 	defer conn.Close()
 
@@ -78,7 +143,6 @@ func (g *gromeURL) Request() (*response, error) {
 	var b bytes.Buffer
 	_, err = io.Copy(&b, conn)
 
-	var res response
 	resReader := bufio.NewReader(&b)
 	statusLine, _ := resReader.ReadString('\n')
 	proto, status, ok := strings.Cut(statusLine, " ")
