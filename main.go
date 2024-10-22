@@ -17,6 +17,7 @@ func main() {
 		fmt.Println("unable to get response:", err)
 		os.Exit(1)
 	}
+	defer res.conn.Close()
 
 	view := res.Show()
 	fmt.Println(view)

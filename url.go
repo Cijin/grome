@@ -20,11 +20,11 @@ const (
 	httpVersion = "HTTP/1.1"
 )
 
-// TODO 1-6
-
 type gromeURL struct {
 	URL        *url.URL
 	viewsource bool
+	keepalive  bool
+	conn       io.ReadWriteCloser
 }
 
 func New(rawURL string) (*gromeURL, error) {
@@ -48,7 +48,7 @@ func New(rawURL string) (*gromeURL, error) {
 		parsedURL = parsedSourceURL
 	}
 
-	return &gromeURL{parsedURL, viewsource}, nil
+	return &gromeURL{parsedURL, viewsource, true, nil}, nil
 }
 
 func (g *gromeURL) Request() (*response, error) {
@@ -56,84 +56,91 @@ func (g *gromeURL) Request() (*response, error) {
 	var res response
 	res.viewsource = g.viewsource
 
-	switch g.URL.Scheme {
-	case "https":
-		c, err := net.Dial("tcp", net.JoinHostPort(g.URL.Host, "443"))
-		if err != nil {
-			return nil, err
-		}
+	if g.keepalive && g.conn != nil {
+		conn = g.conn
+	}
 
-		roots, err := x509.SystemCertPool()
-		if err != nil {
-			return nil, err
-		}
-		conn = tls.Client(c, &tls.Config{RootCAs: roots, ServerName: g.URL.Host})
-
-	case "http":
-		var err error
-		port := "80"
-		host := g.URL.Host
-		if strings.Contains(g.URL.Host, ":") {
-			var ok bool
-			host, port, ok = strings.Cut(g.URL.Host, ":")
-			if !ok {
-				return nil, fmt.Errorf("unable to process host and custom port for: %s", g.URL.Host)
-			}
-		}
-
-		conn, err = net.Dial("tcp", net.JoinHostPort(host, port))
-		if err != nil {
-			return nil, err
-		}
-
-	case "file":
-		path := g.URL.Path
-		info, err := os.Stat(path)
-		if err != nil {
-			return nil, err
-		}
-
-		if info.IsDir() {
-			files, err := os.ReadDir(path)
+	// TODO: as is, 'file' & 'data' cases will not work
+	if conn == nil {
+		switch g.URL.Scheme {
+		case "https":
+			c, err := net.Dial("tcp", net.JoinHostPort(g.URL.Host, "443"))
 			if err != nil {
 				return nil, err
 			}
 
-			var b strings.Builder
-			for _, file := range files {
-				if file.IsDir() {
-					b.WriteString(fmt.Sprintf("\n%s/", file.Name()))
-					continue
-				}
+			roots, err := x509.SystemCertPool()
+			if err != nil {
+				return nil, err
+			}
+			conn = tls.Client(c, &tls.Config{RootCAs: roots, ServerName: g.URL.Host})
 
-				b.WriteString(fmt.Sprintf("\n%s", file.Name()))
+		case "http":
+			var err error
+			port := "80"
+			host := g.URL.Host
+			if strings.Contains(g.URL.Host, ":") {
+				var ok bool
+				host, port, ok = strings.Cut(g.URL.Host, ":")
+				if !ok {
+					return nil, fmt.Errorf("unable to process host and custom port for: %s", g.URL.Host)
+				}
 			}
 
-			res.content = b.String()
+			conn, err = net.Dial("tcp", net.JoinHostPort(host, port))
+			if err != nil {
+				return nil, err
+			}
+
+		case "file":
+			path := g.URL.Path
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil, err
+			}
+
+			if info.IsDir() {
+				files, err := os.ReadDir(path)
+				if err != nil {
+					return nil, err
+				}
+
+				var b strings.Builder
+				for _, file := range files {
+					if file.IsDir() {
+						b.WriteString(fmt.Sprintf("\n%s/", file.Name()))
+						continue
+					}
+
+					b.WriteString(fmt.Sprintf("\n%s", file.Name()))
+				}
+
+				res.content = b.String()
+				return &res, nil
+			}
+
+			res.content = fmt.Sprintf("Name: %s\tSize: %d Bytes\n", info.Name(), info.Size())
 			return &res, nil
+
+		case "data":
+			_, data, ok := strings.Cut(g.URL.String(), ":")
+			if !ok {
+				return nil, fmt.Errorf("%s is not a valid data URL", g.URL)
+			}
+
+			_, value, ok := strings.Cut(data, ",")
+			if !ok {
+				return nil, fmt.Errorf("scheme:%s, invalid format for data:%s", g.URL.Scheme, data)
+			}
+
+			res.content = value
+			return &res, nil
+
+		default:
+			return nil, fmt.Errorf("grome currently does not support scheme:%s", g.URL.Scheme)
 		}
-
-		res.content = fmt.Sprintf("Name: %s\tSize: %d Bytes\n", info.Name(), info.Size())
-		return &res, nil
-
-	case "data":
-		_, data, ok := strings.Cut(g.URL.String(), ":")
-		if !ok {
-			return nil, fmt.Errorf("%s is not a valid data URL", g.URL)
-		}
-
-		_, value, ok := strings.Cut(data, ",")
-		if !ok {
-			return nil, fmt.Errorf("scheme:%s, invalid format for data:%s", g.URL.Scheme, data)
-		}
-
-		res.content = value
-		return &res, nil
-
-	default:
-		return nil, fmt.Errorf("grome currently does not support scheme:%s", g.URL.Scheme)
 	}
-	defer conn.Close()
+	res.conn = conn
 
 	_, err := conn.Write(g.request())
 	if err != nil {

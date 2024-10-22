@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"strings"
 )
 
 type response struct {
 	proto      string
+	conn       io.ReadWriteCloser
 	status     string
 	headers    map[string]string
 	content    string
