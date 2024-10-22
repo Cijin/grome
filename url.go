@@ -12,19 +12,22 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
 const (
-	userAgent   = "grome-browser"
-	httpVersion = "HTTP/1.1"
+	userAgent        = "grome-browser"
+	httpVersion      = "HTTP/1.1"
+	maxRedirectCount = 5
 )
 
 type gromeURL struct {
-	URL        *url.URL
-	viewsource bool
-	keepalive  bool
-	conn       io.ReadWriteCloser
+	URL           *url.URL
+	viewsource    bool
+	keepalive     bool
+	conn          io.ReadWriteCloser
+	redirectCount int
 }
 
 func New(rawURL string) (*gromeURL, error) {
@@ -48,19 +51,30 @@ func New(rawURL string) (*gromeURL, error) {
 		parsedURL = parsedSourceURL
 	}
 
-	return &gromeURL{parsedURL, viewsource, true, nil}, nil
+	keepalive := true
+	if parsedURL.Scheme == "file" || parsedURL.Scheme == "data" {
+		keepalive = false
+	}
+
+	return &gromeURL{
+		URL:           parsedURL,
+		viewsource:    viewsource,
+		keepalive:     keepalive,
+		conn:          nil,
+		redirectCount: 0,
+	}, nil
 }
 
 func (g *gromeURL) Request() (*response, error) {
 	var conn io.ReadWriteCloser
 	var res response
 	res.viewsource = g.viewsource
+	res.keepalive = g.keepalive
 
 	if g.keepalive && g.conn != nil {
 		conn = g.conn
 	}
 
-	// TODO: as is, 'file' & 'data' cases will not work
 	if conn == nil {
 		switch g.URL.Scheme {
 		case "https":
@@ -147,15 +161,15 @@ func (g *gromeURL) Request() (*response, error) {
 		return nil, err
 	}
 
-	var b bytes.Buffer
-	_, err = io.Copy(&b, conn)
-
-	resReader := bufio.NewReader(&b)
+	resReader := bufio.NewReader(conn)
 	statusLine, _ := resReader.ReadString('\n')
 	proto, status, ok := strings.Cut(statusLine, " ")
 	if !ok {
 		return nil, fmt.Errorf("malformed HTTP response %s", statusLine)
 	}
+
+	fmt.Println("Status:", status)
+	// if status
 
 	res.proto = proto
 	res.status = status
@@ -177,9 +191,29 @@ func (g *gromeURL) Request() (*response, error) {
 	if value, ok := headers["content-encoding"]; ok {
 		return nil, fmt.Errorf("unexpected 'content-encoding=%s' header present", value)
 	}
-
 	res.headers = headers
-	res.content, _ = resReader.ReadString(0)
+
+	if g.keepalive {
+		s, ok := headers["content-length"]
+		if !ok {
+			return nil, errors.New("response header is missing content-length for a keep alive request")
+		}
+
+		contentLength, err := strconv.ParseInt(s, 10, 0)
+		if err != nil {
+			return nil, fmt.Errorf("content length '%s' is not valid", s)
+		}
+
+		content := make([]byte, contentLength)
+		_, err = io.ReadFull(resReader, content)
+		if err != nil {
+			return nil, fmt.Errorf("error reading content from response reader:%v", err)
+		}
+
+		res.content = string(content)
+	} else {
+		res.content, _ = resReader.ReadString(0)
+	}
 
 	return &res, nil
 }
@@ -197,7 +231,11 @@ func (g *gromeURL) defaultHeaders() string {
 	headers := make(map[string]string)
 	headers["Host"] = g.URL.Host
 	headers["User-Agent"] = userAgent
-	headers["Connection"] = "close"
+	if g.keepalive {
+		headers["Connection"] = "keep-alive"
+	} else {
+		headers["Connection"] = "close"
+	}
 
 	return addHeaders(headers)
 }

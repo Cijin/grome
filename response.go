@@ -12,6 +12,7 @@ type response struct {
 	status     string
 	headers    map[string]string
 	content    string
+	keepalive  bool
 	viewsource bool
 }
 

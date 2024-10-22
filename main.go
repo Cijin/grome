@@ -6,7 +6,7 @@ import (
 )
 
 func main() {
-	g, err := New("view-source:http://example.org/")
+	g, err := New("http://example.org/")
 	if err != nil {
 		fmt.Println("error parsing url:", err)
 		os.Exit(1)
@@ -17,7 +17,9 @@ func main() {
 		fmt.Println("unable to get response:", err)
 		os.Exit(1)
 	}
-	defer res.conn.Close()
+	if res.keepalive {
+		defer res.conn.Close()
+	}
 
 	view := res.Show()
 	fmt.Println(view)
