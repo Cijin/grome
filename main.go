@@ -6,7 +6,7 @@ import (
 )
 
 func main() {
-	g, err := New("http://example.org/")
+	g, err := New("http://browser.engineering/redirect3")
 	if err != nil {
 		fmt.Println("error parsing url:", err)
 		os.Exit(1)

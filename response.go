@@ -7,20 +7,21 @@ import (
 )
 
 type response struct {
-	proto      string
-	conn       io.ReadWriteCloser
-	status     string
-	headers    map[string]string
-	content    string
-	keepalive  bool
-	viewsource bool
+	proto        string
+	conn         io.ReadWriteCloser
+	status       int64
+	statusString string
+	headers      map[string]string
+	content      string
+	keepalive    bool
+	viewsource   bool
 }
 
 func (r *response) String() string {
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf("Protocol: %s\n", r.proto))
-	b.WriteString(fmt.Sprintf("Status: %s\n", r.status))
+	b.WriteString(fmt.Sprintf("Status: %s\n", r.statusString))
 	b.WriteString("Headers:\n")
 
 	for key, value := range r.headers {

@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	userAgent        = "grome-browser"
-	httpVersion      = "HTTP/1.1"
-	maxRedirectCount = 5
+	userAgent           = "grome-browser"
+	httpVersion         = "HTTP/1.1"
+	maxAllowedRedirects = 5
 )
 
 type gromeURL struct {
@@ -78,30 +78,15 @@ func (g *gromeURL) Request() (*response, error) {
 	if conn == nil {
 		switch g.URL.Scheme {
 		case "https":
-			c, err := net.Dial("tcp", net.JoinHostPort(g.URL.Host, "443"))
+			var err error
+			conn, err = getHttpsConn(g.URL.Host, "443")
 			if err != nil {
 				return nil, err
 			}
-
-			roots, err := x509.SystemCertPool()
-			if err != nil {
-				return nil, err
-			}
-			conn = tls.Client(c, &tls.Config{RootCAs: roots, ServerName: g.URL.Host})
 
 		case "http":
 			var err error
-			port := "80"
-			host := g.URL.Host
-			if strings.Contains(g.URL.Host, ":") {
-				var ok bool
-				host, port, ok = strings.Cut(g.URL.Host, ":")
-				if !ok {
-					return nil, fmt.Errorf("unable to process host and custom port for: %s", g.URL.Host)
-				}
-			}
-
-			conn, err = net.Dial("tcp", net.JoinHostPort(host, port))
+			conn, err = getHttpConn(g.URL.Host, "80")
 			if err != nil {
 				return nil, err
 			}
@@ -156,42 +141,103 @@ func (g *gromeURL) Request() (*response, error) {
 	}
 	res.conn = conn
 
-	_, err := conn.Write(g.request())
+	err := writeRequest(conn, g.URL, g.keepalive)
 	if err != nil {
 		return nil, err
 	}
 
 	resReader := bufio.NewReader(conn)
-	statusLine, _ := resReader.ReadString('\n')
-	proto, status, ok := strings.Cut(statusLine, " ")
-	if !ok {
-		return nil, fmt.Errorf("malformed HTTP response %s", statusLine)
+
+	statusElements, err := getStatusElements(resReader)
+	if err != nil {
+		return nil, err
 	}
 
-	fmt.Println("Status:", status)
-	// if status
+	proto := statusElements[0]
+	statusString := statusElements[1]
+	status, err := getStatus(statusString)
+	if err != nil {
+		return nil, err
+	}
 
 	res.proto = proto
+	res.statusString = statusString
 	res.status = status
 
-	headers := make(map[string]string)
-	for {
-		line, _ := resReader.ReadString('\n')
-		if line == "\r\n" {
-			break
-		}
-		header, value, _ := strings.Cut(line, ":")
-		headers[strings.ToLower(header)] = strings.TrimSpace(value)
-	}
-
-	if value, ok := headers["transfer-encoding"]; ok {
-		return nil, fmt.Errorf("unexpected 'transfer-encoding=%s' header present", value)
-	}
-
-	if value, ok := headers["content-encoding"]; ok {
-		return nil, fmt.Errorf("unexpected 'content-encoding=%s' header present", value)
+	headers, err := getHeaders(resReader)
+	if err != nil {
+		return nil, err
 	}
 	res.headers = headers
+
+	if status >= 300 && status < 400 {
+		for {
+			g.redirectCount += 1
+			if g.redirectCount >= maxAllowedRedirects {
+				return nil, errors.New("redirect loop has exceeded max allowed")
+			}
+
+			r, ok := headers["location"]
+			if !ok {
+				return nil, errors.New("redirect response is missing location header")
+			}
+
+			if r[0] == '/' {
+				temp := g.URL.Scheme + "://" + g.URL.Host
+				r = temp + r
+			}
+
+			redirectURL, err := url.Parse(r)
+			if err != nil {
+				return nil, fmt.Errorf("unable to parse redirect url:%v", err)
+			}
+
+			isCrossOriginRedirection := redirectURL.Host != g.URL.Host
+			if isCrossOriginRedirection {
+				if redirectURL.Scheme == "http" {
+					conn, err = getHttpConn(redirectURL.Host, "80")
+					if err != nil {
+						return nil, fmt.Errorf("unable to establish http conn for redirectURL:%s, err:%v", redirectURL, err)
+					}
+				} else if redirectURL.Scheme == "https" {
+					conn, err = getHttpsConn(redirectURL.Host, "443")
+					if err != nil {
+						return nil, fmt.Errorf("unable to establish https conn for redirectURL:%s, err:%v", redirectURL, err)
+					}
+				} else {
+					return nil, fmt.Errorf("invalid scheme '%s' for redirectURL:%s", redirectURL.Scheme, redirectURL)
+				}
+			}
+
+			// close connections for cross origin requests
+			err = writeRequest(conn, redirectURL, !isCrossOriginRedirection)
+			if err != nil {
+				return nil, fmt.Errorf("failed to write redirect request:%v", err)
+			}
+
+			resReader = bufio.NewReader(conn)
+			statusElements, err := getStatusElements(resReader)
+			if err != nil {
+				return nil, fmt.Errorf("redirect status err:%v", err)
+			}
+
+			status, err := getStatus(statusElements[1])
+			if err != nil {
+				return nil, err
+			}
+
+			headers, err = getHeaders(resReader)
+			if err != nil {
+				return nil, err
+			}
+
+			if status >= 300 && status < 400 {
+				continue
+			}
+
+			break
+		}
+	}
 
 	if g.keepalive {
 		s, ok := headers["content-length"]
@@ -218,20 +264,105 @@ func (g *gromeURL) Request() (*response, error) {
 	return &res, nil
 }
 
-func (g *gromeURL) request() []byte {
+func getHttpConn(host, port string) (net.Conn, error) {
+	if strings.Contains(host, ":") {
+		conn, err := net.Dial("tcp", host)
+		if err != nil {
+			return nil, err
+		}
+
+		return conn, nil
+	}
+
+	conn, err := net.Dial("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+func getHttpsConn(url, port string) (*tls.Conn, error) {
+	c, err := getHttpConn(url, port)
+	if err != nil {
+		return nil, err
+	}
+
+	roots, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, err
+	}
+	return tls.Client(c, &tls.Config{RootCAs: roots, ServerName: url}), nil
+}
+
+func getHeaders(r *bufio.Reader) (map[string]string, error) {
+	headers := make(map[string]string)
+	for {
+		line, _ := r.ReadString('\n')
+		if line == "\r\n" {
+			break
+		}
+		header, value, _ := strings.Cut(line, ":")
+		headers[strings.ToLower(header)] = strings.TrimSpace(value)
+	}
+
+	if value, ok := headers["transfer-encoding"]; ok {
+		return nil, fmt.Errorf("unexpected 'transfer-encoding=%s' header present", value)
+	}
+
+	if value, ok := headers["content-encoding"]; ok {
+		return nil, fmt.Errorf("unexpected 'content-encoding=%s' header present", value)
+	}
+
+	return headers, nil
+}
+
+func getStatusElements(r *bufio.Reader) ([]string, error) {
+	statusLine, err := r.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+
+	statusElements := strings.SplitN(statusLine, " ", 2)
+	if len(statusElements) != 2 {
+		return nil, fmt.Errorf("malformed status response %s", statusLine)
+	}
+
+	return statusElements, nil
+}
+
+func writeRequest(conn io.Writer, u *url.URL, keepalive bool) error {
+	_, err := conn.Write(getRequestBytes(u, keepalive))
+	return err
+}
+
+func getRequestBytes(u *url.URL, keepalive bool) []byte {
 	var b bytes.Buffer
-	b.WriteString(fmt.Sprintf("%s %s %s\r\n", http.MethodGet, g.URL.Path, httpVersion))
-	b.WriteString(g.defaultHeaders())
+	b.WriteString(fmt.Sprintf("%s %s %s\r\n", http.MethodGet, u.Path, httpVersion))
+	b.WriteString(defaultHeaders(u.Host, keepalive))
 	b.WriteString("\r\n")
 
 	return b.Bytes()
 }
 
-func (g *gromeURL) defaultHeaders() string {
+func getStatus(statusString string) (int64, error) {
+	statusValue, _, ok := strings.Cut(statusString, " ")
+	if !ok {
+		return 0, fmt.Errorf("unable to retrieve status from status string: %s", statusString)
+	}
+	status, err := strconv.ParseInt(statusValue, 10, 0)
+	if err != nil {
+		return 0, fmt.Errorf("status %s is invalid", statusValue)
+	}
+
+	return status, nil
+}
+
+func defaultHeaders(host string, keepalive bool) string {
 	headers := make(map[string]string)
-	headers["Host"] = g.URL.Host
+	headers["Host"] = host
 	headers["User-Agent"] = userAgent
-	if g.keepalive {
+	if keepalive {
 		headers["Connection"] = "keep-alive"
 	} else {
 		headers["Connection"] = "close"
