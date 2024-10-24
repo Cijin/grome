@@ -9,7 +9,7 @@ import (
 type response struct {
 	proto        string
 	conn         io.ReadWriteCloser
-	status       int64
+	status       int
 	statusString string
 	headers      map[string]string
 	content      string

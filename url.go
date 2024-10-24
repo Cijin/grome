@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -28,7 +29,7 @@ type cached struct {
 	response *response
 }
 
-var cache map[string]cached
+var cache = make(map[string]cached)
 
 type gromeURL struct {
 	URL           *url.URL
@@ -179,8 +180,8 @@ func (g *gromeURL) Request() (*response, error) {
 	}
 	res.headers = headers
 
-	cacheAge, ok := headers["cache-control"]
-	cacheable := ok && strings.Contains(cacheAge, "max-age") && status == 200
+	cacheDirective, ok := headers["cache-control"]
+	cacheable := ok && strings.Contains(cacheDirective, "max-age") && status == 200
 	if cacheable {
 		cached, ok := cache[g.URL.String()]
 		if ok {
@@ -256,18 +257,19 @@ func (g *gromeURL) Request() (*response, error) {
 			if status >= 300 && status < 400 {
 				continue
 			}
-
 			break
 		}
 	}
 
+	contentEncoding, ok := headers["content-encoding"]
+	isGzipped := ok && contentEncoding == "gzip"
 	if g.keepalive {
 		s, ok := headers["content-length"]
 		if !ok {
 			return nil, errors.New("response header is missing content-length for a keep alive request")
 		}
 
-		contentLength, err := strconv.ParseInt(s, 10, 0)
+		contentLength, err := strconv.Atoi(s)
 		if err != nil {
 			return nil, fmt.Errorf("content length '%s' is not valid", s)
 		}
@@ -278,21 +280,56 @@ func (g *gromeURL) Request() (*response, error) {
 			return nil, fmt.Errorf("error reading content from response reader:%v", err)
 		}
 
-		res.content = string(content)
+		if isGzipped {
+			content, err = getUncompressedContent(content)
+			if err != nil {
+				return nil, err
+			}
+
+			res.content = string(content)
+		} else {
+			if isGzipped {
+				content, err = getUncompressedContent(content)
+				if err != nil {
+					return nil, err
+				}
+			}
+			res.content = string(content)
+		}
 	} else {
 		res.content, _ = resReader.ReadString(0)
 	}
 
 	if cacheable {
-		maxAge, err := strconv.ParseInt(cacheAge, 10, 0)
+		// max-age=xxx
+		_, maxAgeString, ok := strings.Cut(cacheDirective, "=")
+		if !ok {
+			fmt.Printf("cache directive '%s' is not cacheable", cacheDirective)
+		}
+		maxAge, err := strconv.Atoi(maxAgeString)
 		if err != nil {
-			fmt.Printf("Max age value '%s' is not valid", cacheAge)
+			fmt.Printf("Max age value '%s' is not valid", cacheDirective)
 		} else {
 			cache[g.URL.String()] = cached{expires: time.Now().Add(time.Duration(maxAge) * time.Second), response: &res}
 		}
 	}
 
 	return &res, nil
+}
+
+func getUncompressedContent(c []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(c))
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+
+	uncompressed, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, err
+	}
+
+	return uncompressed, nil
 }
 
 func getHttpConn(host, port string) (net.Conn, error) {
@@ -341,10 +378,6 @@ func getHeaders(r *bufio.Reader) (map[string]string, error) {
 		return nil, fmt.Errorf("unexpected 'transfer-encoding=%s' header present", value)
 	}
 
-	if value, ok := headers["content-encoding"]; ok {
-		return nil, fmt.Errorf("unexpected 'content-encoding=%s' header present", value)
-	}
-
 	return headers, nil
 }
 
@@ -376,12 +409,12 @@ func getRequestBytes(u *url.URL, keepalive bool) []byte {
 	return b.Bytes()
 }
 
-func getStatus(statusString string) (int64, error) {
+func getStatus(statusString string) (int, error) {
 	statusValue, _, ok := strings.Cut(statusString, " ")
 	if !ok {
 		return 0, fmt.Errorf("unable to retrieve status from status string: %s", statusString)
 	}
-	status, err := strconv.ParseInt(statusValue, 10, 0)
+	status, err := strconv.Atoi(statusValue)
 	if err != nil {
 		return 0, fmt.Errorf("status %s is invalid", statusValue)
 	}
@@ -392,6 +425,7 @@ func getStatus(statusString string) (int64, error) {
 func defaultHeaders(host string, keepalive bool) string {
 	headers := make(map[string]string)
 	headers["Host"] = host
+	headers["Accept-Encoding"] = "gzip"
 	headers["User-Agent"] = userAgent
 	if keepalive {
 		headers["Connection"] = "keep-alive"
