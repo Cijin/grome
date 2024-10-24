@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -22,12 +23,20 @@ const (
 	maxAllowedRedirects = 5
 )
 
+type cached struct {
+	expires  time.Time
+	response *response
+}
+
+var cache map[string]cached
+
 type gromeURL struct {
 	URL           *url.URL
 	viewsource    bool
 	keepalive     bool
 	conn          io.ReadWriteCloser
 	redirectCount int
+	cache         map[string]cached
 }
 
 func New(rawURL string) (*gromeURL, error) {
@@ -170,6 +179,19 @@ func (g *gromeURL) Request() (*response, error) {
 	}
 	res.headers = headers
 
+	cacheAge, ok := headers["cache-control"]
+	cacheable := ok && strings.Contains(cacheAge, "max-age") && status == 200
+	if cacheable {
+		cached, ok := cache[g.URL.String()]
+		if ok {
+			if cached.expires.Before(time.Now()) {
+				delete(cache, g.URL.String())
+			} else {
+				return cached.response, nil
+			}
+		}
+	}
+
 	if status >= 300 && status < 400 {
 		for {
 			g.redirectCount += 1
@@ -259,6 +281,15 @@ func (g *gromeURL) Request() (*response, error) {
 		res.content = string(content)
 	} else {
 		res.content, _ = resReader.ReadString(0)
+	}
+
+	if cacheable {
+		maxAge, err := strconv.ParseInt(cacheAge, 10, 0)
+		if err != nil {
+			fmt.Printf("Max age value '%s' is not valid", cacheAge)
+		} else {
+			cache[g.URL.String()] = cached{expires: time.Now().Add(time.Duration(maxAge) * time.Second), response: &res}
+		}
 	}
 
 	return &res, nil
