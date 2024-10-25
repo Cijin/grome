@@ -156,9 +156,10 @@ func (g *gromeURL) Request() (*response, error) {
 		return nil, err
 	}
 
-	resReader := bufio.NewReader(conn)
+	var buffer bytes.Buffer
+	chunkReader := bufio.NewReader(conn)
 
-	statusElements, err := getStatusElements(resReader)
+	statusElements, err := getStatusElements(chunkReader)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +175,7 @@ func (g *gromeURL) Request() (*response, error) {
 	res.statusString = statusString
 	res.status = status
 
-	headers, err := getHeaders(resReader)
+	headers, err := getHeaders(chunkReader)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +193,47 @@ func (g *gromeURL) Request() (*response, error) {
 			}
 		}
 	}
+
+	// read chunked body
+	var contentLength int64
+	for {
+		line, err := chunkReader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return nil, err
+		}
+
+		line = strings.TrimSpace(line)
+		chunkSize, err := strconv.ParseInt(line, 16, 64)
+		if err != nil {
+			return nil, err
+		}
+
+		if chunkSize == 0 {
+			break
+		}
+
+		contentLength += chunkSize
+		chunk := make([]byte, chunkSize)
+		_, err = io.ReadFull(chunkReader, chunk)
+		if err != nil {
+			return nil, err
+		}
+
+		buffer.Write(chunk)
+
+		_, err = chunkReader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	resReader := bufio.NewReader(&buffer)
+	headers["content-length"] = fmt.Sprintf("%d", contentLength)
+	res.headers = headers
 
 	if status >= 300 && status < 400 {
 		for {
@@ -374,10 +416,6 @@ func getHeaders(r *bufio.Reader) (map[string]string, error) {
 		headers[strings.ToLower(header)] = strings.TrimSpace(value)
 	}
 
-	if value, ok := headers["transfer-encoding"]; ok {
-		return nil, fmt.Errorf("unexpected 'transfer-encoding=%s' header present", value)
-	}
-
 	return headers, nil
 }
 
@@ -426,6 +464,7 @@ func defaultHeaders(host string, keepalive bool) string {
 	headers := make(map[string]string)
 	headers["Host"] = host
 	headers["Accept-Encoding"] = "gzip"
+	headers["Transfer-Encoding"] = "chunked"
 	headers["User-Agent"] = userAgent
 	if keepalive {
 		headers["Connection"] = "keep-alive"
